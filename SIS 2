@@ -1,0 +1,30 @@
+import json
+import os
+import boto3
+import uuid
+
+TABLE_NAME = os.environ.get("TABLE_NAME", "Orders")
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table(TABLE_NAME)
+
+def lambda_handler(event, context):
+    try:
+        body = json.loads(event.get("body", "{}"))
+        item_name = body.get("item", "Unknown Item")
+        
+        new_order_id = str(uuid.uuid4())
+        
+        table.put_item(
+            Item={"OrderID": new_order_id, "item_name": item_name, "status": "NEW"},
+            ConditionExpression="attribute_not_exists(OrderID)"
+        )
+        
+        return {
+            "statusCode": 201,
+            "body": json.dumps({"OrderID": new_order_id, "message": "Order created"})
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
