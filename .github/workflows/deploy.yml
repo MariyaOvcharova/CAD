@@ -1,0 +1,61 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+env:
+  STACK: sis3-ci
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production   # the OIDC subject ends with :environment:production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test (lint and compile)
+        run: |
+          pip install cfn-lint
+          cfn-lint template.yaml
+          python -m py_compile app/app.py
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: eu-north-1
+
+      - name: Create or update the stack
+        run: |
+          aws cloudformation deploy --stack-name $STACK --template-file template.yaml \
+            --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset
+
+      - name: Build and push the image, tag is the commit SHA
+        run: |
+          REPO=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" --output text)
+          NAME=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query "Stacks[0].Outputs[?OutputKey=='RepositoryName'].OutputValue" --output text)
+          if ! aws ecr describe-images --repository-name $NAME --image-ids imageTag=$GITHUB_SHA > /dev/null 2>&1; then
+            aws ecr get-login-password | docker login -u AWS --password-stdin ${REPO%%/*}
+            docker build --platform linux/amd64 -t $REPO:$GITHUB_SHA app/
+            docker push $REPO:$GITHUB_SHA
+          fi
+
+      - name: Deploy the stack with the new image tag
+        run: |
+          aws cloudformation deploy --stack-name $STACK --template-file template.yaml \
+            --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset \
+            --parameter-overrides ImageTag=$GITHUB_SHA
+
+      - name: Smoke test
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" --output text)
+          echo "$URL"
+          curl -f --retry 20 --retry-delay 10 --retry-all-errors $URL/health
